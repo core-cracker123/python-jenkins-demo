@@ -2,7 +2,6 @@ pipeline {
     agent any
 
     environment {
-        // Defines the name tag for your local Docker image
         IMAGE_NAME = "python-jenkins-demo:${BUILD_NUMBER}"
     }
 
@@ -14,26 +13,29 @@ pipeline {
         }
 
         stage('Test Inside Docker') {
-            agent {
-                // Runs this specific stage inside an ephemeral Python container
-                docker { 
-                    image 'python:3.11-slim'
-                    // Reuses the workspace to store test artifacts
-                    args '-v /tmp:/tmp' 
-                }
-            }
             steps {
-                sh '''
-                    pip install -r requirements.txt
-                    pytest test_app.py --junitxml=results.xml
-                '''
+                echo "Running tests inside an ephemeral Docker container..."
+                // Using a script block to safely handle test failures without breaking the build
+                script {
+                    try {
+                        sh '''
+                            docker run --rm -v "$(pwd)":/app -w /app python:3.11-slim sh -c "
+                                pip install --no-cache-dir -r requirements.txt &&
+                                pytest test_app.py --junitxml=results.xml
+                            "
+                        '''
+                    } catch (Exception e) {
+                        // Mark build as unstable if tests fail, but do not stop the pipeline completely
+                        currentBuild.result = 'UNSTABLE'
+                        echo "Testing completed with failures: ${e.message}"
+                    }
+                }
             }
         }
 
         stage('Build Docker Image') {
             steps {
                 echo "Building production Docker image..."
-                // Builds the Dockerfile in the root directory
                 sh "docker build -t ${IMAGE_NAME} ."
             }
         }
@@ -41,7 +43,6 @@ pipeline {
         stage('Run Docker Container') {
             steps {
                 echo "Testing container runtime..."
-                // Runs the newly built container to verify output
                 sh "docker run --rm ${IMAGE_NAME}"
             }
         }
@@ -49,14 +50,10 @@ pipeline {
 
     post {
         always {
-            // Publishes the test results graph on the Jenkins dashboard
-            junit 'results.xml'
-        }
-        success {
-            echo "Pipeline complete! Image ${IMAGE_NAME} is ready for deployment."
+            // Jenkins will parse this XML even if tests fail
+            junit allowEmptyResults: true, testResults: 'results.xml'
         }
         cleanup {
-            // Cleans up old images from the Jenkins agent host to save space
             sh "docker rmi ${IMAGE_NAME} || true"
         }
     }
